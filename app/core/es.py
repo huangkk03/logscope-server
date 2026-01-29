@@ -18,7 +18,7 @@ def normalize_es_host(host: str) -> str:
     return h
 
 async def init_es(app):
-    # ES 9.x 必须显式提供 hosts / cloud_id，否则会在启动阶段直接抛 ValueError。
+    # 从环境变量读取 ES_HOSTS，未设置时默认本地 9200。
     hosts = _parse_hosts_from_env(os.getenv("ES_HOSTS")) or ["http://localhost:9200"]
     app.state.es = AsyncElasticsearch(
         hosts=hosts,

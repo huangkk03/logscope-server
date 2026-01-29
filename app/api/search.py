@@ -16,11 +16,12 @@ router = APIRouter()
 
 class SearchRequest(BaseModel):
     index: str
-    es_host: str
-    es_api_key: str
+    es_host: Optional[str] = None
+    es_api_key: Optional[str] = None
     query: str = "*"
-    start_time: Optional[str]
-    end_time: Optional[str]
+    # pydantic v2：Optional 但未给默认值时仍然视为必填；这里显式给 None，避免 422
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
     size: int = Field(default=50000, ge=1, le=200000)
     filters: Optional[Dict[str, str]] = None
 
@@ -35,12 +36,15 @@ async def search(
 
     # 不要修改全局共享的 app.state.es（并发请求会互相覆盖 hosts/api_key）。
     # 每次请求按参数创建独立 ES 客户端，用完即关闭。
-    es = AsyncElasticsearch(
+    kwargs = dict(
         hosts=[normalize_es_host(body.es_host)],
-        api_key=body.es_api_key,
         verify_certs=False,
         ssl_show_warn=False,
     )
+    if body.es_api_key:
+        kwargs["api_key"] = body.es_api_key
+
+    es = AsyncElasticsearch(**kwargs)
 
     filters = []
 

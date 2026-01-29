@@ -1,5 +1,6 @@
 fastapi>=0.128.0
 uvicorn>=0.40.0
-elasticsearch>=9.2.1
+# 兼容大多数现网 ES 7/8（避免客户端发送 compatible-with=9 导致 400）
+elasticsearch>=8.0.0,<9
 aiohttp>=3.9.0
 
