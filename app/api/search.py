@@ -1,6 +1,7 @@
 # coding=utf-8
 import uuid
 from typing import Optional, Dict
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Request, BackgroundTasks, HTTPException
 from fastapi.responses import PlainTextResponse, FileResponse
 from pydantic import BaseModel, Field
@@ -48,12 +49,25 @@ async def search(
 
     filters = []
 
-    if body.start_time and body.end_time:
+    # 时间过滤优化：
+    # - 只要传了 start_time/end_time 任意一个就生效（不强制两个都传）
+    # - 若两者都不传：默认从“北京时间当天 00:00:00”开始往后取
+    if body.start_time or body.end_time:
+        ts_range = {}
+        if body.start_time:
+            ts_range["gte"] = to_utc(body.start_time)
+        if body.end_time:
+            ts_range["lte"] = to_utc(body.end_time)
+        filters.append({"range": {"@timestamp": ts_range}})
+    else:
+        bj_tz = timezone(timedelta(hours=8))
+        start_of_today_bj = datetime.now(bj_tz).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         filters.append({
             "range": {
                 "@timestamp": {
-                    "gte": to_utc(body.start_time),
-                    "lte": to_utc(body.end_time)
+                    "gte": to_utc(start_of_today_bj.isoformat())
                 }
             }
         })
