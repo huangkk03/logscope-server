@@ -185,7 +185,11 @@ async def console():
           </div>
           <div>
             <label>Index</label>
-            <input id="index" value=".ds-filebeat*" />
+            <div class="actions" style="gap:8px;">
+              <input id="index" value=".ds-filebeat*" />
+              <button class="secondary" id="pickIndex" type="button">选择索引</button>
+            </div>
+            <div class="hint">可手工输入通配（如 <span class="mono">.ds-filebeat*</span>）。“选择索引”支持正则筛选候选列表。</div>
           </div>
         </div>
 
@@ -316,6 +320,46 @@ async def console():
     </div>
   </div>
 
+  <div id="indexPopover" class="popover" role="dialog" aria-modal="false" aria-label="索引选择" style="right: 18px; bottom: 18px; width:min(720px, calc(100vw - 24px));">
+    <div class="popover-hd">
+      <div>
+        <div style="font-weight: 650;">选择索引</div>
+        <div class="hint">从 ES 动态拉取 index 列表；支持通配缩小范围 + 正则筛选。</div>
+      </div>
+      <button class="secondary" id="indexClose" type="button">关闭</button>
+    </div>
+    <div class="popover-bd">
+      <div class="row3" style="grid-template-columns: 1fr 1fr auto;">
+        <div>
+          <label>通配（发送给 ES）</label>
+          <input id="idx_pattern" placeholder="*" />
+        </div>
+        <div>
+          <label>正则（本地过滤）</label>
+          <input id="idx_regex" placeholder="例如：filebeat|logstash" />
+        </div>
+        <div class="actions" style="justify-content:flex-end; align-items:flex-end; padding-top: 24px;">
+          <button class="secondary" id="idxRefresh" type="button">刷新</button>
+        </div>
+      </div>
+      <div style="height:10px;"></div>
+      <div class="hint" id="idxStatus"></div>
+      <div style="height:10px;"></div>
+      <div style="border:1px solid var(--border); border-radius:12px; overflow:auto; max-height:320px; background: rgba(10,16,28,0.35);">
+        <table class="filters" style="margin:0;">
+          <thead><tr><th>Index（点击选择）</th></tr></thead>
+          <tbody id="idxList"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="popover-ft">
+      <div class="hint">提示：选择后会把 index 写回输入框，你仍可手工改成通配模式。</div>
+      <div class="actions">
+        <button class="secondary" id="idxUseInput" type="button">用当前输入作为通配</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const $ = (id) => document.getElementById(id);
     const LS_KEY = "logscope.console.v1";
@@ -375,6 +419,21 @@ async def console():
 
     function closeTimePopover() {
       const pop = $("timePopover");
+      if (pop) pop.classList.remove("open");
+    }
+
+    function openIndexPopover() {
+      const pop = $("indexPopover");
+      if (!pop) return;
+      $("idx_pattern").value = ($("index").value || "*").trim() || "*";
+      $("idx_regex").value = "";
+      $("idxStatus").textContent = "";
+      pop.classList.add("open");
+      scheduleLoadIndices();
+    }
+
+    function closeIndexPopover() {
+      const pop = $("indexPopover");
       if (pop) pop.classList.remove("open");
     }
 
@@ -834,6 +893,62 @@ async def console():
       return filterOptionsMap.has(k) ? filterOptionsMap.get(k) : [];
     }
 
+    // ----- index 动态获取（ES cat indices） -----
+    let _idxTimer = null;
+    function scheduleLoadIndices() {
+      if (_idxTimer) clearTimeout(_idxTimer);
+      _idxTimer = setTimeout(loadIndices, 200);
+    }
+
+    async function loadIndices() {
+      const token = $("token").value.trim();
+      const esId = $("es_config_id").value;
+      if (!token || !esId) {
+        $("idxStatus").textContent = "请先填写 token 并选择 ES 配置";
+        $("idxList").innerHTML = "";
+        return;
+      }
+      const pattern = ($("idx_pattern").value || "*").trim() || "*";
+      const regex = ($("idx_regex").value || "").trim() || undefined;
+      $("idxStatus").textContent = "加载中…";
+
+      try {
+        const resp = await fetch("/api/logscope/suggest-indices", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            es_config_id: Number(esId),
+            index_pattern: pattern,
+            regex,
+            size: 800
+          })
+        });
+        const text = await resp.text();
+        if (!resp.ok) throw new Error(text || `HTTP ${resp.status}`);
+        const data = text ? JSON.parse(text) : {};
+        const list = Array.isArray(data.indices) ? data.indices : [];
+        $("idxStatus").textContent = `候选 ${list.length} 个`;
+        const tbody = $("idxList");
+        tbody.innerHTML = "";
+        list.forEach(idx => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td class="mono" style="cursor:pointer;">${idx}</td>`;
+          tr.addEventListener("click", () => {
+            $("index").value = idx;
+            saveLocal();
+            closeIndexPopover();
+          });
+          tbody.appendChild(tr);
+        });
+      } catch (e) {
+        $("idxStatus").textContent = `加载失败：${String(e)}`;
+        $("idxList").innerHTML = "";
+      }
+    }
+
     $("pickTime").addEventListener("click", (e) => { e.preventDefault(); openTimePopover(); });
     $("start_time").addEventListener("click", (e) => { e.preventDefault(); openTimePopover(); });
     $("end_time").addEventListener("click", (e) => { e.preventDefault(); openTimePopover(); });
@@ -896,6 +1011,13 @@ async def console():
     // token 变化后自动刷新选项
     $("token").addEventListener("change", () => { saveLocal(); scheduleLoadOptions(); });
     $("token").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); saveLocal(); scheduleLoadOptions(); }});
+
+    $("pickIndex").addEventListener("click", (e) => { e.preventDefault(); openIndexPopover(); });
+    $("indexClose").addEventListener("click", (e) => { e.preventDefault(); closeIndexPopover(); });
+    $("idxRefresh").addEventListener("click", (e) => { e.preventDefault(); scheduleLoadIndices(); });
+    $("idx_pattern").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); scheduleLoadIndices(); }});
+    $("idx_regex").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); scheduleLoadIndices(); }});
+    $("idxUseInput").addEventListener("click", (e) => { e.preventDefault(); $("idx_pattern").value = ($("index").value || "*").trim() || "*"; scheduleLoadIndices(); });
     // readonly 字段，提示用户使用弹窗选择
   </script>
 </body>

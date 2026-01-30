@@ -1,5 +1,6 @@
 # coding=utf-8
 import uuid
+import re
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Request, BackgroundTasks, HTTPException
@@ -278,6 +279,76 @@ async def suggest_values(req: Request, body: SuggestValuesRequest):
             if s:
                 values.append(s)
         return {"field": body.field, "agg_field": agg_field, "values": values}
+    finally:
+        await es.close()
+
+
+class SuggestIndicesRequest(BaseModel):
+    es_config_id: Optional[int] = None
+    es_host: Optional[str] = None
+    es_api_key: Optional[str] = None
+    # 先用通配缩小范围（ES 支持 * 通配），默认 *
+    index_pattern: str = Field(default="*", max_length=300)
+    # 在候选结果里再用正则过滤（Python regex）
+    regex: Optional[str] = Field(default=None, max_length=300)
+    size: int = Field(default=500, ge=1, le=5000)
+
+
+@router.post("/suggest-indices")
+async def suggest_indices(req: Request, body: SuggestIndicesRequest):
+    """
+    动态获取 index 候选列表（用于前端下拉），并支持正则过滤。
+    """
+    check_auth(req)
+
+    es_host = body.es_host
+    es_api_key = body.es_api_key
+    if body.es_config_id is not None:
+        cfg = get_es_config(body.es_config_id)
+        if not cfg:
+            raise HTTPException(400, "Invalid es_config_id")
+        es_host = cfg.get("host") or es_host
+        es_api_key = cfg.get("api_key") or es_api_key
+
+    kwargs = dict(
+        hosts=[normalize_es_host(es_host)],
+        verify_certs=False,
+        ssl_show_warn=False,
+    )
+    if es_api_key:
+        kwargs["api_key"] = es_api_key
+    es = AsyncElasticsearch(**kwargs)
+
+    try:
+        pattern = (body.index_pattern or "*").strip() or "*"
+        # ES cat 支持通配，避免拉全量（如果用户输入的是通配）
+        rows = await es.cat.indices(index=pattern, format="json", h="index")
+        indices = []
+        for r in rows or []:
+            name = (r.get("index") or "").strip()
+            if name:
+                indices.append(name)
+
+        # 正则过滤（可选）
+        if body.regex:
+            try:
+                rx = re.compile(body.regex)
+            except re.error as e:
+                raise HTTPException(400, f"Invalid regex: {e}")
+            indices = [x for x in indices if rx.search(x)]
+
+        # 去重 + 截断
+        seen = set()
+        out = []
+        for x in indices:
+            if x in seen:
+                continue
+            seen.add(x)
+            out.append(x)
+            if len(out) >= body.size:
+                break
+
+        return {"indices": out}
     finally:
         await es.close()
 
