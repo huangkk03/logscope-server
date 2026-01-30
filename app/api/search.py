@@ -108,3 +108,18 @@ async def download(file: str, req: Request):
     check_auth(req)
     path = get_file_path(file)
     return FileResponse(path, filename=file)
+
+
+@router.get("/preview/{file}")
+async def preview(file: str, req: Request, max_bytes: int = 200_000):
+    """
+    在线预览：只读取文件前 max_bytes（默认 200KB），避免浏览器直接加载大文件一直转圈。
+    """
+    check_auth(req)
+    path = get_file_path(file)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read(max_bytes)
+    except FileNotFoundError:
+        raise HTTPException(404, "File not found")
+    return PlainTextResponse(content)

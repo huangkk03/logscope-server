@@ -5,6 +5,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 router = APIRouter()
 
+_LS_KEY = "logscope.console.v1"
 
 @router.get("/", include_in_schema=False)
 async def root():
@@ -14,7 +15,7 @@ async def root():
 @router.get("/console", response_class=HTMLResponse, include_in_schema=False)
 async def console():
     # 纯静态 HTML + 原生 JS（不引入额外依赖），同域调用 /api/logscope/search
-    html = """
+    html = r"""
 <!doctype html>
 <html lang="zh-CN">
 <head>
@@ -242,11 +243,35 @@ async def console():
       <div class="row">
         <div>
           <label>Start</label>
-          <input id="dlg_start" type="datetime-local" step="1" />
+          <div class="row" style="grid-template-columns: 1fr 1fr;">
+            <div>
+              <label style="margin-top:0;">日期</label>
+              <div class="actions" style="gap:8px;">
+                <input id="dlg_start_date" type="date" />
+                <button class="secondary" id="pickStartDate" type="button">选日期</button>
+              </div>
+            </div>
+            <div>
+              <label style="margin-top:0;">时间</label>
+              <input id="dlg_start_time" type="time" step="1" />
+            </div>
+          </div>
         </div>
         <div>
           <label>End</label>
-          <input id="dlg_end" type="datetime-local" step="1" />
+          <div class="row" style="grid-template-columns: 1fr 1fr;">
+            <div>
+              <label style="margin-top:0;">日期</label>
+              <div class="actions" style="gap:8px;">
+                <input id="dlg_end_date" type="date" />
+                <button class="secondary" id="pickEndDate" type="button">选日期</button>
+              </div>
+            </div>
+            <div>
+              <label style="margin-top:0;">时间</label>
+              <input id="dlg_end_time" type="time" step="1" />
+            </div>
+          </div>
         </div>
       </div>
       <div style="height:10px;"></div>
@@ -278,32 +303,51 @@ async def console():
       return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
     }
 
-    function toLocalInputValue(iso) {
-      // 期望 iso 为 YYYY-MM-DDTHH:MM:SS（不带时区）或浏览器可解析格式
-      if (!iso) return "";
-      const m = String(iso).trim().match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})(?::(\d{2}))?$/);
-      if (m) return `${m[1]}:${m[2] || "00"}`;
-      // 尝试让 Date 解析（可能带时区）
-      const dt = new Date(iso);
-      if (isNaN(dt.getTime())) return "";
+    function parseIsoToDateTimeParts(iso) {
+      // 允许：YYYY-MM-DDTHH:MM:SS（无时区）或浏览器可解析格式（带时区）
+      const s = (iso || "").trim();
+      if (!s) return { date: "", time: "" };
+
+      const m = s.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::(\d{2}))?$/);
+      if (m) return { date: m[1], time: `${m[2]}:${m[3] || "00"}` };
+
+      const dt = new Date(s);
+      if (isNaN(dt.getTime())) return { date: "", time: "" };
       const pad = (n) => String(n).padStart(2, "0");
-      return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+      return {
+        date: `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}`,
+        time: `${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`
+      };
     }
 
-    function fromLocalInputValue(v) {
-      // datetime-local 输出一般为 YYYY-MM-DDTHH:MM 或 YYYY-MM-DDTHH:MM:SS
-      const s = (v || "").trim();
-      if (!s) return "";
-      const m = s.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})(?::(\d{2}))?$/);
-      if (!m) return s;
-      return `${m[1]}:${m[2] || "00"}`;
+    function buildIsoFromParts(date, time) {
+      const d = (date || "").trim();
+      if (!d) return "";
+      const t = (time || "").trim();
+      if (!t) return `${d}T00:00:00`;
+      // type=time 可能输出 HH:MM 或 HH:MM:SS
+      const m = t.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+      if (!m) return `${d}T${t}`;
+      return `${d}T${m[1]}:${m[2]}:${m[3] || "00"}`;
     }
 
     function openTimePopover() {
       const pop = $("timePopover");
-      $("dlg_start").value = toLocalInputValue($("start_time").value);
-      $("dlg_end").value = toLocalInputValue($("end_time").value);
+      const s = parseIsoToDateTimeParts($("start_time").value);
+      const e = parseIsoToDateTimeParts($("end_time").value);
+      $("dlg_start_date").value = s.date;
+      $("dlg_start_time").value = s.time;
+      $("dlg_end_date").value = e.date;
+      $("dlg_end_time").value = e.time;
       if (pop) pop.classList.add("open");
+
+      // 尝试自动弹出日期选择器（部分浏览器支持 showPicker）
+      setTimeout(() => {
+        const el = $("dlg_start_date");
+        if (!el) return;
+        el.focus();
+        try { if (el.showPicker) el.showPicker(); } catch (e) {}
+      }, 0);
     }
 
     function closeTimePopover() {
@@ -312,8 +356,8 @@ async def console():
     }
 
     function applyTimePopover() {
-      const s = fromLocalInputValue($("dlg_start").value);
-      const e = fromLocalInputValue($("dlg_end").value);
+      const s = buildIsoFromParts($("dlg_start_date").value, $("dlg_start_time").value);
+      const e = buildIsoFromParts($("dlg_end_date").value, $("dlg_end_time").value);
       $("start_time").value = s;
       $("end_time").value = e;
       closeTimePopover();
@@ -322,28 +366,35 @@ async def console():
     function clearTime() {
       $("start_time").value = "";
       $("end_time").value = "";
-      $("dlg_start").value = "";
-      $("dlg_end").value = "";
+      $("dlg_start_date").value = "";
+      $("dlg_start_time").value = "";
+      $("dlg_end_date").value = "";
+      $("dlg_end_time").value = "";
     }
 
     function setPreset(kind) {
       const now = new Date();
       const pad = (n) => String(n).padStart(2, "0");
-      const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+      const fmtDate = (d) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+      const fmtTime = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 
       if (kind === "today") {
         const start = new Date(now);
         start.setHours(0,0,0,0);
-        $("dlg_start").value = fmt(start);
-        $("dlg_end").value = fmt(now);
+        $("dlg_start_date").value = fmtDate(start);
+        $("dlg_start_time").value = fmtTime(start);
+        $("dlg_end_date").value = fmtDate(now);
+        $("dlg_end_time").value = fmtTime(now);
         return;
       }
 
       const mins = kind === "5m" ? 5 : kind === "15m" ? 15 : kind === "1h" ? 60 : 0;
       if (mins > 0) {
         const start = new Date(now.getTime() - mins * 60 * 1000);
-        $("dlg_start").value = fmt(start);
-        $("dlg_end").value = fmt(now);
+        $("dlg_start_date").value = fmtDate(start);
+        $("dlg_start_time").value = fmtTime(start);
+        $("dlg_end_date").value = fmtDate(now);
+        $("dlg_end_time").value = fmtTime(now);
       }
     }
 
@@ -464,16 +515,48 @@ async def console():
         const url = text.trim();
         setStatus("成功", "ok");
         const safe = url.replaceAll("<","&lt;").replaceAll(">","&gt;");
+        const file = url.split("/").pop();
+        const viewUrl = `/view/${encodeURIComponent(file)}`;
         setOut(`
           <div class="hint">下载链接：</div>
           <div style="height:8px;"></div>
           <pre class="mono">${safe}</pre>
           <div style="height:10px;"></div>
           <div class="actions">
-            <a href="${safe}" target="_blank" rel="noreferrer">打开下载</a>
+            <button class="secondary" id="downloadBtn" type="button">下载（带 token）</button>
+            <a href="${viewUrl}" target="_blank" rel="noreferrer">在线打开</a>
             <button class="secondary" id="copy">复制链接</button>
           </div>
         `);
+        const dlBtn = document.getElementById("downloadBtn");
+        if (dlBtn) {
+          dlBtn.addEventListener("click", async () => {
+            try {
+              setStatus("下载中…", "");
+              const resp2 = await fetch(`/api/logscope/download/${encodeURIComponent(file)}`, {
+                headers: { "Authorization": `Bearer ${token}` }
+              });
+              const blob = await resp2.blob();
+              if (!resp2.ok) {
+                const t = await blob.text();
+                setStatus(`下载失败：HTTP ${resp2.status}`, "bad");
+                setOut(`<pre class="mono">${t}</pre>`);
+                return;
+              }
+              const a = document.createElement("a");
+              const u = URL.createObjectURL(blob);
+              a.href = u;
+              a.download = file || "log.txt";
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              URL.revokeObjectURL(u);
+              setStatus("成功", "ok");
+            } catch (e) {
+              setStatus("下载异常", "bad");
+            }
+          });
+        }
         const copyBtn = document.getElementById("copy");
         if (copyBtn) {
           copyBtn.addEventListener("click", async () => {
@@ -499,6 +582,20 @@ async def console():
     $("timeClose").addEventListener("click", (e) => { e.preventDefault(); closeTimePopover(); });
     $("timeApply").addEventListener("click", (e) => { e.preventDefault(); applyTimePopover(); saveLocal(); });
     $("timeClear").addEventListener("click", (e) => { e.preventDefault(); clearTime(); saveLocal(); closeTimePopover(); });
+
+    // 兜底：显式按钮触发原生日历
+    $("pickStartDate").addEventListener("click", (e) => {
+      e.preventDefault();
+      const el = $("dlg_start_date");
+      el.focus();
+      try { if (el.showPicker) el.showPicker(); } catch (err) {}
+    });
+    $("pickEndDate").addEventListener("click", (e) => {
+      e.preventDefault();
+      const el = $("dlg_end_date");
+      el.focus();
+      try { if (el.showPicker) el.showPicker(); } catch (err) {}
+    });
 
     document.querySelectorAll("button[data-preset]").forEach(btn => {
       btn.addEventListener("click", (e) => {
@@ -532,6 +629,237 @@ async def console():
 </body>
 </html>
 """
-    return HTMLResponse(content=html)
+    return HTMLResponse(
+        content=html,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/view/{file}", response_class=HTMLResponse, include_in_schema=False)
+async def view_file(file: str):
+    """
+    在线查看导出的日志文件：
+    - 页面本身不要求 Header（便于新标签页打开）
+    - 页面内用 localStorage 保存的 token，fetch 下载接口并展示内容
+    """
+    safe_file = (file or "").strip().replace('"', "").replace("'", "")
+    html = rf"""
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LogScope 在线查看</title>
+  <style>
+    :root {{
+      --bg: #0b1220;
+      --panel: #121a2b;
+      --muted: #93a4c7;
+      --text: #e8eefc;
+      --border: rgba(255,255,255,0.10);
+      --accent: #4f8cff;
+      --danger: #ff5a7a;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      background: var(--bg);
+      color: var(--text);
+    }}
+    .wrap {{ max-width: 1100px; margin: 22px auto; padding: 0 16px; }}
+    .top {{
+      display:flex; justify-content: space-between; align-items: center; gap: 12px;
+      margin-bottom: 12px;
+    }}
+    .card {{
+      background: rgba(18,26,43,0.72);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      backdrop-filter: blur(10px);
+    }}
+    .hint {{ color: var(--muted); font-size: 12px; }}
+    a {{ color: var(--accent); }}
+    .actions {{ display:flex; gap:10px; align-items:center; flex-wrap: wrap; }}
+    button {{
+      border: 1px solid var(--border);
+      background: rgba(10,16,28,0.35);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 10px;
+      cursor: pointer;
+    }}
+    button.danger {{ border-color: rgba(255,90,122,0.55); }}
+    pre {{
+      margin: 0; padding: 12px; border-radius: 12px; overflow: auto;
+      border: 1px solid var(--border);
+      background: rgba(10,16,28,0.55);
+      color: #d7e3ff;
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre;
+    }}
+    /* 自动换行（更适合阅读长行日志） */
+    pre.wrap {{
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }}
+    .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <div style="font-weight:650;">在线查看</div>
+        <div class="hint">文件：<span class="mono">{safe_file}</span></div>
+      </div>
+      <div class="actions">
+        <a class="mono" href="/console" target="_blank" rel="noreferrer">返回控制台</a>
+        <button id="downloadBtn" type="button">下载（带 token）</button>
+        <button id="toggleWrap" type="button">自动换行：开</button>
+        <button class="danger" id="clearToken">清空 token</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="hint">提示：该页面会从浏览器 localStorage 读取 token，并带 Authorization 去请求下载接口。</div>
+      <div style="height:10px;"></div>
+      <div id="status" class="hint"></div>
+      <div style="height:10px;"></div>
+      <pre id="content" class="mono wrap">加载中…</pre>
+    </div>
+  </div>
+
+  <script>
+    const LS_KEY = "{_LS_KEY}";
+    const WRAP_KEY = "logscope.view.wrap.v1";
+    const file = "{safe_file}";
+    const statusEl = document.getElementById("status");
+    const pre = document.getElementById("content");
+    const previewUrl = `/api/logscope/preview/${{encodeURIComponent(file)}}`;
+    const downloadUrl = `/api/logscope/download/${{encodeURIComponent(file)}}`;
+    const wrapBtn = document.getElementById("toggleWrap");
+    document.getElementById("downloadBtn").addEventListener("click", async () => {{
+      const token = getToken();
+      if (!token) {{
+        setStatus("未找到 token：请先在 /console 填写并保存。", true);
+        return;
+      }}
+      try {{
+        setStatus("下载中…");
+        const resp = await fetch(downloadUrl, {{
+          headers: {{ "Authorization": `Bearer ${{token}}` }}
+        }});
+        const blob = await resp.blob();
+        if (!resp.ok) {{
+          const t = await blob.text();
+          setStatus(`下载失败：HTTP ${{resp.status}}`, true);
+          pre.textContent = t;
+          return;
+        }}
+        const a = document.createElement("a");
+        const u = URL.createObjectURL(blob);
+        a.href = u;
+        a.download = file || "log.txt";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(u);
+        setStatus("下载成功");
+      }} catch (e) {{
+        setStatus("下载异常", true);
+      }}
+    }});
+
+    function getToken() {{
+      try {{
+        const raw = localStorage.getItem(LS_KEY);
+        if (!raw) return "";
+        const s = JSON.parse(raw);
+        return (s.token || "").trim();
+      }} catch (e) {{
+        return "";
+      }}
+    }}
+
+    function setStatus(msg, bad=false) {{
+      statusEl.textContent = msg || "";
+      statusEl.style.color = bad ? "var(--danger)" : "var(--muted)";
+    }}
+
+    function getWrapEnabled() {{
+      try {{
+        const v = localStorage.getItem(WRAP_KEY);
+        if (v === null) return true; // 默认开启
+        return v === "1";
+      }} catch (e) {{
+        return true;
+      }}
+    }}
+
+    function setWrapEnabled(enabled) {{
+      try {{ localStorage.setItem(WRAP_KEY, enabled ? "1" : "0"); }} catch (e) {{}}
+      if (enabled) pre.classList.add("wrap");
+      else pre.classList.remove("wrap");
+      wrapBtn.textContent = enabled ? "自动换行：开" : "自动换行：关";
+    }}
+
+    async function load() {{
+      const token = getToken();
+      if (!token) {{
+        setStatus("未找到 token：请先在 /console 填写并保存。", true);
+        pre.textContent = "无法加载：缺少 Authorization Token。";
+        return;
+      }}
+      setStatus("请求中…");
+      try {{
+        const resp = await fetch(previewUrl, {{
+          headers: {{ "Authorization": `Bearer ${{token}}` }}
+        }});
+        const text = await resp.text();
+        if (!resp.ok) {{
+          setStatus(`失败：HTTP ${{resp.status}}`, true);
+          pre.textContent = text;
+          return;
+        }}
+        setStatus("预览加载成功（仅前 200KB）");
+        pre.textContent = text || "(空文件)";
+      }} catch (e) {{
+        setStatus("请求异常", true);
+        pre.textContent = String(e);
+      }}
+    }}
+
+    document.getElementById("clearToken").addEventListener("click", () => {{
+      try {{
+        const raw = localStorage.getItem(LS_KEY);
+        if (raw) {{
+          const s = JSON.parse(raw);
+          s.token = "";
+          localStorage.setItem(LS_KEY, JSON.stringify(s));
+        }}
+      }} catch (e) {{}}
+      load();
+    }});
+
+    wrapBtn.addEventListener("click", () => {{
+      setWrapEnabled(!pre.classList.contains("wrap"));
+    }});
+
+    // 初始化换行偏好（默认开）
+    setWrapEnabled(getWrapEnabled());
+
+    load();
+  </script>
+</body>
+</html>
+"""
+    return HTMLResponse(
+        content=html,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
