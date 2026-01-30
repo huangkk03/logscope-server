@@ -56,6 +56,12 @@ async def console():
       border-radius: 14px;
       padding: 14px;
       backdrop-filter: blur(10px);
+      position: relative;
+      z-index: 1;
+    }
+    /* 打开下拉时把当前卡片抬高，避免被“结果”卡片遮挡（backdrop-filter 会形成独立层叠上下文） */
+    .card.raise {
+      z-index: 50;
     }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
@@ -110,6 +116,19 @@ async def console():
     a { color: var(--accent); }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
     .mini-actions { display:flex; gap:8px; flex-wrap: wrap; }
+    /* Value：Key 同款下拉（可滚动，单选） */
+    .ms { width: 100%; }
+    .ms-select {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(10,16,28,0.55);
+      color: var(--text);
+      padding: 8px;
+      outline: none;
+    }
+    .ms-select:focus { border-color: rgba(79,140,255,0.55); box-shadow: 0 0 0 3px rgba(79,140,255,0.12); }
+    /* 不允许前台新增 value：仅从后台 options 选择 */
 
     /* 时间选择：右下角 Popover（类似 Kibana） */
     .popover {
@@ -162,7 +181,7 @@ async def console():
           <div>
             <label>Authorization Token（Bearer）</label>
             <input id="token" placeholder="your-secret-admin-token" />
-            <div class="hint">仅存本地浏览器 localStorage，不会发送到除本服务外的任何地方。</div>
+            <div class="hint">仅存本地浏览器 localStorage（不同浏览器/无痕窗口不共享）。保存后会自动刷新后台 key/value 选项。</div>
           </div>
           <div>
             <label>Index</label>
@@ -172,12 +191,15 @@ async def console():
 
         <div class="row">
           <div>
-            <label>ES Host</label>
-            <input id="es_host" placeholder="https://your-es:9200" />
+            <label>ES 配置（后台预置）</label>
+            <select id="es_config_id">
+              <option value="">（不使用预置）</option>
+            </select>
+            <div class="hint">推荐使用后台预置：前端不需要保存/暴露 API Key。</div>
           </div>
           <div>
-            <label>ES API Key</label>
-            <input id="es_api_key" placeholder="base64..." />
+            <label>Filters 选项（后台预置）</label>
+            <div class="hint">每行的 Value 下拉多选会按 Key 自动加载后台配置的可选值。</div>
           </div>
         </div>
 
@@ -209,6 +231,7 @@ async def console():
             <button class="secondary" id="pickTime">选择时间</button>
             <button class="secondary" id="clearTime">清空时间</button>
             <button class="secondary" id="addFilter">+ 添加过滤</button>
+            <button class="secondary" id="refreshOptions">刷新选项</button>
             <button class="secondary" id="save">保存到本地</button>
             <button id="run">查询并导出</button>
           </div>
@@ -398,15 +421,105 @@ async def console():
       }
     }
 
-    function addFilterRow(k = "", v = "") {
+    // key 现在完全来自后台 filter options（/api/admin/filter-presets 返回的 key 列表）
+    // 存结构：[{key,label}]
+    let AVAILABLE_KEYS = [];
+
+    // Value 渲染：单选下拉（像 key），可“新增值”后加入选项并选中
+    function _renderMultiSelect(container, options, selected) {
+      const opts = Array.isArray(options) ? options : [];
+      // selected 可能来自旧 localStorage（数组/字符串），这里统一取单值
+      let sel = "";
+      if (Array.isArray(selected)) sel = (selected[0] || "").toString();
+      else sel = (selected || "").toString();
+      sel = sel.trim();
+
+      container.innerHTML = `
+        <select class="ms-select"></select>
+        <input class="fval" type="hidden" value=""/>
+      `;
+      const selectEl = container.querySelector(".ms-select");
+      const hidden = container.querySelector(".fval");
+
+      const sync = () => {
+        hidden.value = sel;
+      };
+
+      const rebuildSelect = () => {
+        selectEl.innerHTML = "";
+        if (opts.length === 0) {
+          const opt = document.createElement("option");
+          opt.value = "";
+          opt.textContent = "(无可选项，请在后台配置)";
+          opt.disabled = true;
+          opt.selected = false;
+          selectEl.appendChild(opt);
+          selectEl.disabled = true;
+          return;
+        }
+        selectEl.disabled = false;
+        opts.forEach(v => {
+          const vv = String(v);
+          const opt = document.createElement("option");
+          opt.value = vv;
+          opt.textContent = vv;
+          if (sel && vv === sel) opt.selected = true;
+          selectEl.appendChild(opt);
+        });
+        if (!sel && selectEl.options.length > 0) {
+          selectEl.selectedIndex = 0;
+          sel = selectEl.value;
+        }
+      };
+
+      selectEl.addEventListener("change", () => {
+        sel = (selectEl.value || "").trim();
+        sync();
+      });
+
+      rebuildSelect();
+      sync();
+    }
+
+    function addFilterRow(k = "", v = "", options = []) {
       const tr = document.createElement("tr");
+      const key = (k || "").trim() || (AVAILABLE_KEYS[0]?.key || "");
+      const knownKeys = (AVAILABLE_KEYS || []).map(x => x.key);
+      const isKnown = knownKeys.includes(key);
       tr.innerHTML = `
-        <td><input class="fkey" placeholder="container.labels.service_project" value="${k.replaceAll('"','&quot;')}" /></td>
-        <td><input class="fval" placeholder="umcare" value="${v.replaceAll('"','&quot;')}" /></td>
+        <td>
+          <select class="fkey">
+            ${(AVAILABLE_KEYS || []).map(x => `<option value="${x.key}" title="${x.key}">${(x.label || x.key)}</option>`).join("")}
+            ${isKnown ? "" : (key ? `<option value="${key}" selected>${key}</option>` : "")}
+          </select>
+        </td>
+        <td><div class="ms"></div></td>
         <td><button class="danger" title="删除">删</button></td>
       `;
+      const sel = tr.querySelector(".fkey");
+      if (sel) {
+        sel.value = key;
+        sel.addEventListener("change", () => {
+          // key 变更后刷新可选 values
+          (async () => {
+            const opts = await getOptionsForKey(sel.value);
+            const ms = tr.querySelector(".ms");
+            if (ms) _renderMultiSelect(ms, opts, []);
+            saveLocal();
+          })();
+        });
+      }
       tr.querySelector("button").addEventListener("click", () => tr.remove());
       $("filtersTable").querySelector("tbody").appendChild(tr);
+
+      const ms = tr.querySelector(".ms");
+      // v 允许 string 或 array（本地存储会回放）
+      const selected = Array.isArray(v) ? v : (v ? [v] : []);
+      // options 为空则按 key 动态加载
+      (async () => {
+        const opts = (Array.isArray(options) && options.length) ? options : await getOptionsForKey(key);
+        _renderMultiSelect(ms, opts, selected);
+      })();
     }
 
     function readFilters() {
@@ -414,8 +527,13 @@ async def console():
       const obj = {};
       for (const r of rows) {
         const k = (r.querySelector(".fkey").value || "").trim();
-        const v = (r.querySelector(".fval").value || "").trim();
-        if (k && v) obj[k] = v;
+        const v = (r.querySelector(".fval").value || "").toString().trim();
+        if (!k || !v) continue;
+        // 同 key 多行：合并为多值（OR）；不同 key：并列（AND）
+        const cur = obj[k];
+        const curList = (cur === undefined) ? [] : (Array.isArray(cur) ? cur : [cur]);
+        const merged = Array.from(new Set(curList.concat([v])));
+        obj[k] = merged.length === 1 ? merged[0] : merged;
       }
       return obj;
     }
@@ -427,8 +545,8 @@ async def console():
         const s = JSON.parse(raw);
         if (s.token) $("token").value = s.token;
         if (s.index) $("index").value = s.index;
-        if (s.es_host) $("es_host").value = s.es_host;
-        if (s.es_api_key) $("es_api_key").value = s.es_api_key;
+        if (s.es_config_id) $("es_config_id").value = String(s.es_config_id);
+        // 旧字段已废弃：filter_preset_id
         if (s.query) $("query").value = s.query;
         if (s.size) $("size").value = s.size;
         if (s.start_time) $("start_time").value = s.start_time;
@@ -436,8 +554,11 @@ async def console():
         $("filtersTable").querySelector("tbody").innerHTML = "";
         const fs = s.filters || {};
         const keys = Object.keys(fs);
-        if (keys.length === 0) addFilterRow("container.labels.service_project", "");
-        else keys.forEach(k => addFilterRow(k, fs[k]));
+        if (keys.length === 0) {
+          // keys 将在 loadOptions 后补齐；这里先不创建，避免空下拉
+        } else {
+          keys.forEach(k => addFilterRow(k, fs[k], []));
+        }
       } catch (e) {
         // ignore
       }
@@ -447,8 +568,8 @@ async def console():
       const state = {
         token: $("token").value.trim(),
         index: $("index").value.trim(),
-        es_host: $("es_host").value.trim(),
-        es_api_key: $("es_api_key").value.trim(),
+        es_config_id: $("es_config_id").value || "",
+        filter_preset_id: "",
         query: $("query").value.trim(),
         start_time: $("start_time").value.trim(),
         end_time: $("end_time").value.trim(),
@@ -483,8 +604,8 @@ async def console():
 
       const body = {
         index: $("index").value.trim(),
-        es_host: $("es_host").value.trim() || undefined,
-        es_api_key: $("es_api_key").value.trim() || undefined,
+        es_config_id: ($("es_config_id").value ? Number($("es_config_id").value) : undefined),
+        // 不再使用 filter_preset_id（后台仅提供 value 选项，不直接注入过滤条件）
         query: $("query").value.trim() || "*",
         start_time: $("start_time").value.trim() || undefined,
         end_time: $("end_time").value.trim() || undefined,
@@ -575,10 +696,149 @@ async def console():
       }
     }
 
+    // loadOptions 可能被频繁触发（token change/刷新），加一个轻量防抖避免卡顿
+    let _loadOptionsTimer = null;
+    function scheduleLoadOptions() {
+      if (_loadOptionsTimer) clearTimeout(_loadOptionsTimer);
+      _loadOptionsTimer = setTimeout(loadOptions, 180);
+    }
+
+    async function loadOptions() {
+      const token = $("token").value.trim();
+      if (!token) return;
+
+      async function api(path) {
+        const resp = await fetch(path, {
+          headers: { "Authorization": `Bearer ${token}` }
+        });
+        const text = await resp.text();
+        if (!resp.ok) throw new Error(text || `HTTP ${resp.status}`);
+        return text ? JSON.parse(text) : [];
+      }
+
+      try {
+        // key/value 配置可能变动：刷新时清理缓存
+        filterOptionsMap.clear();
+
+        const es = await api("/api/admin/es-configs");
+        const esSel = $("es_config_id");
+        const cur = esSel.value;
+        esSel.innerHTML = `<option value="">（不使用预置）</option>`;
+        es.forEach(x => {
+          const opt = document.createElement("option");
+          opt.value = String(x.id);
+          opt.textContent = `${x.name}  (${x.host})`;
+          esSel.appendChild(opt);
+        });
+        if (cur) esSel.value = cur;
+
+        // 一次性加载 key/label/values（避免 N+1 请求导致“假死”）
+        const full = await api("/api/admin/filter-options");
+        AVAILABLE_KEYS = (full || [])
+          .map(x => ({ key: (x.key || "").toString(), label: (x.label || "").toString() }))
+          .filter(x => x.key);
+        (full || []).forEach(x => {
+          const k = (x.key || "").toString();
+          const v = Array.isArray(x.values) ? x.values : [];
+          if (k) filterOptionsMap.set(k, v);
+        });
+
+        // 如果表格还没行，默认创建 1 行
+        const tbody = $("filtersTable").querySelector("tbody");
+        if (tbody && tbody.children.length === 0) {
+          addFilterRow(AVAILABLE_KEYS[0]?.key || "", "", []);
+        } else {
+          // 让已有行的 key 下拉补齐选项（保持现有选中值）
+          Array.from(tbody.querySelectorAll("tr")).forEach(tr => {
+            const sel = tr.querySelector(".fkey");
+            if (!sel) return;
+            const curKey = sel.value;
+            sel.innerHTML = (AVAILABLE_KEYS || []).map(x => `<option value="${x.key}" title="${x.key}">${(x.label || x.key)}</option>`).join("");
+            if (curKey && (AVAILABLE_KEYS || []).some(x => x.key === curKey)) sel.value = curKey;
+          });
+        }
+      } catch (e) {
+        // 不阻塞页面：后台可能没配置
+      }
+    }
+
+    // key -> values[] 缓存（由 loadOptions 一次性填充；container.name 可被 ES 动态覆盖）
+    const filterOptionsMap = new Map();
+    const esSuggestCache = new Map();
+    async function getOptionsForKey(key) {
+      const k = (key || "").trim();
+      if (!k) return [];
+
+      // container.name：从 ES 动态拉取可选值（避免后台维护）
+      if (k === "container.name") {
+        const token = $("token").value.trim();
+        const esId = $("es_config_id").value;
+        const index = $("index").value.trim();
+        if (!token || !esId || !index) {
+          // 回退到后台配置（如果有）
+          return filterOptionsMap.has(k) ? filterOptionsMap.get(k) : [];
+        }
+
+        // 其它过滤条件：从表格里读，但排除 container.name 自身
+        const other = {};
+        Array.from(document.querySelectorAll("#filtersTable tbody tr")).forEach(tr => {
+          const kk = (tr.querySelector(".fkey")?.value || "").trim();
+          const vv = (tr.querySelector(".fval")?.value || "").trim();
+          if (!kk || !vv) return;
+          if (kk === "container.name") return;
+          other[kk] = vv;
+        });
+
+        const cacheKey = [
+          esId,
+          index,
+          $("start_time").value.trim(),
+          $("end_time").value.trim(),
+          $("query").value.trim(),
+          JSON.stringify(other),
+        ].join("|");
+
+        if (esSuggestCache.has(cacheKey)) return esSuggestCache.get(cacheKey);
+
+        try {
+          const resp = await fetch("/api/logscope/suggest-values", {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              index,
+              es_config_id: Number(esId),
+              field: "container.name",
+              query: $("query").value.trim() || "*",
+              start_time: $("start_time").value.trim() || undefined,
+              end_time: $("end_time").value.trim() || undefined,
+              filters: other,
+              size: 200,
+            }),
+          });
+          const text = await resp.text();
+          if (!resp.ok) throw new Error(text || `HTTP ${resp.status}`);
+          const data = text ? JSON.parse(text) : {};
+          const vals = Array.isArray(data.values) ? data.values : [];
+          esSuggestCache.set(cacheKey, vals);
+          // 同时写入 map，供当前行/其它行复用
+          filterOptionsMap.set(k, vals);
+          return vals;
+        } catch (e) {
+          return filterOptionsMap.has(k) ? filterOptionsMap.get(k) : [];
+        }
+      }
+
+      return filterOptionsMap.has(k) ? filterOptionsMap.get(k) : [];
+    }
+
     $("pickTime").addEventListener("click", (e) => { e.preventDefault(); openTimePopover(); });
     $("start_time").addEventListener("click", (e) => { e.preventDefault(); openTimePopover(); });
     $("end_time").addEventListener("click", (e) => { e.preventDefault(); openTimePopover(); });
     $("clearTime").addEventListener("click", (e) => { e.preventDefault(); clearTime(); saveLocal(); });
+    $("es_config_id").addEventListener("change", () => saveLocal());
     $("timeClose").addEventListener("click", (e) => { e.preventDefault(); closeTimePopover(); });
     $("timeApply").addEventListener("click", (e) => { e.preventDefault(); applyTimePopover(); saveLocal(); });
     $("timeClear").addEventListener("click", (e) => { e.preventDefault(); clearTime(); saveLocal(); closeTimePopover(); });
@@ -618,12 +878,24 @@ async def console():
       if (e.key === "Escape") closeTimePopover();
     });
 
-    $("addFilter").addEventListener("click", () => addFilterRow("", ""));
+    $("addFilter").addEventListener("click", () => {
+      if (!AVAILABLE_KEYS || AVAILABLE_KEYS.length === 0) {
+        setStatus("请先在后台 /admin 配置 filters key/value 选项", "bad");
+        return;
+      }
+      addFilterRow(AVAILABLE_KEYS[0].key, "", []);
+      saveLocal();
+    });
+    $("refreshOptions").addEventListener("click", (e) => { e.preventDefault(); saveLocal(); scheduleLoadOptions(); });
     $("save").addEventListener("click", saveLocal);
     $("run").addEventListener("click", async () => { saveLocal(); await run(); });
 
     // 初始加载
     loadLocal();
+    loadOptions();
+    // token 变化后自动刷新选项
+    $("token").addEventListener("change", () => { saveLocal(); scheduleLoadOptions(); });
+    $("token").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); saveLocal(); scheduleLoadOptions(); }});
     // readonly 字段，提示用户使用弹窗选择
   </script>
 </body>
