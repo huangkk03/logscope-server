@@ -610,14 +610,8 @@ async def console():
         if (s.size) $("size").value = s.size;
         if (s.start_time) $("start_time").value = s.start_time;
         if (s.end_time) $("end_time").value = s.end_time;
+        // 按需求：每次新进入或刷新页面，filters 不默认展示（不从 localStorage 回放）
         $("filtersTable").querySelector("tbody").innerHTML = "";
-        const fs = s.filters || {};
-        const keys = Object.keys(fs);
-        if (keys.length === 0) {
-          // keys 将在 loadOptions 后补齐；这里先不创建，避免空下拉
-        } else {
-          keys.forEach(k => addFilterRow(k, fs[k], []));
-        }
       } catch (e) {
         // ignore
       }
@@ -633,7 +627,8 @@ async def console():
         start_time: $("start_time").value.trim(),
         end_time: $("end_time").value.trim(),
         size: Number($("size").value || 1000),
-        filters: readFilters()
+        // 按需求：避免刷新后 filters 自动出现，这里不持久化 filters
+        filters: {}
       };
       localStorage.setItem(LS_KEY, JSON.stringify(state));
       setStatus("已保存到本地", "ok");
@@ -802,11 +797,9 @@ async def console():
           if (k) filterOptionsMap.set(k, v);
         });
 
-        // 如果表格还没行，默认创建 1 行
+        // 按需求：每次新进入或刷新页面，不默认创建 filters 行
         const tbody = $("filtersTable").querySelector("tbody");
-        if (tbody && tbody.children.length === 0) {
-          addFilterRow(AVAILABLE_KEYS[0]?.key || "", "", []);
-        } else {
+        if (tbody && tbody.children.length > 0) {
           // 让已有行的 key 下拉补齐选项（保持现有选中值）
           Array.from(tbody.querySelectorAll("tr")).forEach(tr => {
             const sel = tr.querySelector(".fkey");
@@ -817,80 +810,91 @@ async def console():
           });
         }
       } catch (e) {
-        // 不阻塞页面：后台可能没配置
+        setStatus("加载后台选项失败：请检查 token 是否正确 / 服务是否已启动", "bad");
       }
     }
 
-    // key -> values[] 缓存（由 loadOptions 一次性填充；container.name 可被 ES 动态覆盖）
+    // key -> values[] 缓存（由 loadOptions 一次性填充；部分 key 可被 ES 动态覆盖）
     const filterOptionsMap = new Map();
     const esSuggestCache = new Map();
+    async function _suggestValuesFromES(fieldKey, otherFilters) {
+      const token = $("token").value.trim();
+      const esId = $("es_config_id").value;
+      const index = $("index").value.trim();
+      if (!token || !esId || !index) return [];
+
+      const fkey = (fieldKey || "").trim();
+      if (!fkey) return [];
+
+      const cacheKey = [
+        fkey,
+        esId,
+        index,
+        $("start_time").value.trim(),
+        $("end_time").value.trim(),
+        $("query").value.trim(),
+        JSON.stringify(otherFilters || {}),
+      ].join("|");
+
+      if (esSuggestCache.has(cacheKey)) return esSuggestCache.get(cacheKey);
+
+      try {
+        const resp = await fetch("/api/logscope/suggest-values", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            index,
+            es_config_id: Number(esId),
+            field: fkey,
+            query: $("query").value.trim() || "*",
+            start_time: $("start_time").value.trim() || undefined,
+            end_time: $("end_time").value.trim() || undefined,
+            filters: otherFilters || {},
+            size: 200,
+          }),
+        });
+        const text = await resp.text();
+        if (!resp.ok) throw new Error(text || `HTTP ${resp.status}`);
+        const data = text ? JSON.parse(text) : {};
+        const vals = Array.isArray(data.values) ? data.values : [];
+        esSuggestCache.set(cacheKey, vals);
+        return vals;
+      } catch (e) {
+        return [];
+      }
+    }
+
     async function getOptionsForKey(key) {
       const k = (key || "").trim();
       if (!k) return [];
 
-      // container.name：从 ES 动态拉取可选值（避免后台维护）
-      if (k === "container.name") {
-        const token = $("token").value.trim();
-        const esId = $("es_config_id").value;
-        const index = $("index").value.trim();
-        if (!token || !esId || !index) {
-          // 回退到后台配置（如果有）
-          return filterOptionsMap.has(k) ? filterOptionsMap.get(k) : [];
-        }
+      // 先用后台配置（若有）
+      const preset = filterOptionsMap.has(k) ? (filterOptionsMap.get(k) || []) : [];
+      if (Array.isArray(preset) && preset.length > 0) return preset;
 
-        // 其它过滤条件：从表格里读，但排除 container.name 自身
-        const other = {};
-        Array.from(document.querySelectorAll("#filtersTable tbody tr")).forEach(tr => {
-          const kk = (tr.querySelector(".fkey")?.value || "").trim();
-          const vv = (tr.querySelector(".fval")?.value || "").trim();
-          if (!kk || !vv) return;
-          if (kk === "container.name") return;
-          other[kk] = vv;
-        });
+      // 若后台未配置 values：对 container.name / kubernetes.* 自动从 ES 动态拉取
+      const isDynamic = (k === "container.name") || k.startsWith("kubernetes.");
+      if (!isDynamic) return preset;
 
-        const cacheKey = [
-          esId,
-          index,
-          $("start_time").value.trim(),
-          $("end_time").value.trim(),
-          $("query").value.trim(),
-          JSON.stringify(other),
-        ].join("|");
+      // 其它过滤条件：从表格里读，但排除当前 key 自身
+      const other = {};
+      Array.from(document.querySelectorAll("#filtersTable tbody tr")).forEach(tr => {
+        const kk = (tr.querySelector(".fkey")?.value || "").trim();
+        const vv = (tr.querySelector(".fval")?.value || "").trim();
+        if (!kk || !vv) return;
+        if (kk === k) return;
+        other[kk] = vv;
+      });
 
-        if (esSuggestCache.has(cacheKey)) return esSuggestCache.get(cacheKey);
-
-        try {
-          const resp = await fetch("/api/logscope/suggest-values", {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${token}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              index,
-              es_config_id: Number(esId),
-              field: "container.name",
-              query: $("query").value.trim() || "*",
-              start_time: $("start_time").value.trim() || undefined,
-              end_time: $("end_time").value.trim() || undefined,
-              filters: other,
-              size: 200,
-            }),
-          });
-          const text = await resp.text();
-          if (!resp.ok) throw new Error(text || `HTTP ${resp.status}`);
-          const data = text ? JSON.parse(text) : {};
-          const vals = Array.isArray(data.values) ? data.values : [];
-          esSuggestCache.set(cacheKey, vals);
-          // 同时写入 map，供当前行/其它行复用
-          filterOptionsMap.set(k, vals);
-          return vals;
-        } catch (e) {
-          return filterOptionsMap.has(k) ? filterOptionsMap.get(k) : [];
-        }
+      const vals = await _suggestValuesFromES(k, other);
+      if (Array.isArray(vals) && vals.length > 0) {
+        filterOptionsMap.set(k, vals);
+        return vals;
       }
-
-      return filterOptionsMap.has(k) ? filterOptionsMap.get(k) : [];
+      return preset;
     }
 
     // ----- index 动态获取（ES cat indices） -----
