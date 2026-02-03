@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Request, BackgroundTasks, HTTPException
 from fastapi.responses import PlainTextResponse, FileResponse
 from pydantic import BaseModel, Field
-from elasticsearch import AsyncElasticsearch
+from elasticsearch import AsyncElasticsearch, ApiError, AuthenticationException, ConnectionError
 
 from app.core.auth import check_auth
 from app.core.time import to_utc
@@ -16,6 +16,32 @@ from app.service.exporter import export_logs
 from app.storage.local import get_file_path, cleanup_file
 
 router = APIRouter()
+
+
+def _raise_es_http(e: Exception) -> None:
+    """
+    将 ES 客户端异常转换为更友好的 HTTP 错误，避免前端看到 500。
+    """
+    if isinstance(e, AuthenticationException):
+        raise HTTPException(
+            401,
+            "Elasticsearch 认证失败（401）。请在 /admin 配置 ES 的 api_key 并在控制台选择该配置，或在请求体中提供 es_api_key。",
+        )
+
+    if isinstance(e, ConnectionError):
+        raise HTTPException(502, f"Elasticsearch 连接失败：{e}")
+
+    if isinstance(e, ApiError):
+        status = getattr(getattr(e, "meta", None), "status", None)
+        try:
+            s = int(status) if status is not None else 502
+        except Exception:
+            s = 502
+        # 4xx 视为请求参数/鉴权问题，5xx 视为上游异常
+        http_status = 400 if 400 <= s < 500 else 502
+        raise HTTPException(http_status, f"Elasticsearch 错误（{s}）：{e}")
+
+    raise HTTPException(502, f"Elasticsearch 异常：{e}")
 
 async def _pick_agg_field(es: AsyncElasticsearch, index: str, field: str) -> str:
     """
@@ -157,16 +183,22 @@ async def search(
     file_path = get_file_path(file_name)
 
     try:
-        count = await export_logs(
-            es=es,
-            index=body.index,
-            query=body.query,
-            filters=filters,
-            file_path=file_path,
-            max_size=body.size
-        )
+        try:
+            count = await export_logs(
+                es=es,
+                index=body.index,
+                query=body.query,
+                filters=filters,
+                file_path=file_path,
+                max_size=body.size
+            )
+        except Exception as e:
+            _raise_es_http(e)
+        return_count = count
     finally:
         await es.close()
+
+    count = return_count
 
     if count == 0:
         raise HTTPException(404, "No log found")
@@ -268,7 +300,10 @@ async def suggest_values(req: Request, body: SuggestValuesRequest):
             },
         }
 
-        resp = await es.search(index=body.index, body=dsl)
+        try:
+            resp = await es.search(index=body.index, body=dsl)
+        except Exception as e:
+            _raise_es_http(e)
         buckets = (((resp or {}).get("aggregations") or {}).get("vals") or {}).get("buckets") or []
         values = []
         for b in buckets:
@@ -279,6 +314,10 @@ async def suggest_values(req: Request, body: SuggestValuesRequest):
             if s:
                 values.append(s)
         return {"field": body.field, "agg_field": agg_field, "values": values}
+    except HTTPException:
+        raise
+    except Exception as e:
+        _raise_es_http(e)
     finally:
         await es.close()
 
@@ -322,7 +361,10 @@ async def suggest_indices(req: Request, body: SuggestIndicesRequest):
     try:
         pattern = (body.index_pattern or "*").strip() or "*"
         # ES cat 支持通配，避免拉全量（如果用户输入的是通配）
-        rows = await es.cat.indices(index=pattern, format="json", h="index")
+        try:
+            rows = await es.cat.indices(index=pattern, format="json", h="index")
+        except Exception as e:
+            _raise_es_http(e)
         indices = []
         for r in rows or []:
             name = (r.get("index") or "").strip()
@@ -349,6 +391,10 @@ async def suggest_indices(req: Request, body: SuggestIndicesRequest):
                 break
 
         return {"indices": out}
+    except HTTPException:
+        raise
+    except Exception as e:
+        _raise_es_http(e)
     finally:
         await es.close()
 
