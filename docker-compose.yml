@@ -1,0 +1,35 @@
+services:
+  logscope:
+    build: .
+    container_name: logscope-server
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # 生产务必修改
+      LOGSCOPE_AUTH_TOKEN: ${LOGSCOPE_AUTH_TOKEN:-your-secret-admin-token}
+      # 默认指向同 compose 里的 ES；如果你有外部 ES，直接改成 http(s)://xxx:9200
+      ES_HOSTS: ${ES_HOSTS:-http://elasticsearch:9200}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      - elasticsearch
+
+  # 可选：本地自带一个 ES（单节点、关闭安全认证，方便开发/测试）
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.2
+    container_name: logscope-es
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+
+volumes:
+  esdata:
+

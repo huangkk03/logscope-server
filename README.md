@@ -82,6 +82,39 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 在页面里填入 **Bearer Token**（就是 `LOGSCOPE_AUTH_TOKEN`），即可调用 API。
 
+## Docker 启动（推荐：docker compose）
+
+项目已提供 `Dockerfile` 与 `docker-compose.yml`。
+
+### 1) 启动（含内置 ES）
+
+```bash
+export LOGSCOPE_AUTH_TOKEN='change-me-to-a-long-random-string'
+docker compose up -d --build
+```
+
+默认端口：
+
+- LogScope：`http://localhost:8000`
+- Elasticsearch（可选）：`http://localhost:9200`
+
+数据持久化：
+
+- `./data` → 容器 `/app/data`（SQLite 配置库 `config.db`）
+- `./logs` → 容器 `/app/logs`（导出文件，默认 120 秒清理）
+
+### 2) 使用外部 ES（不使用 compose 内置 ES）
+
+方式一：直接改 `docker-compose.yml` 里的 `ES_HOSTS` 为外部地址，并删除/注释 `elasticsearch` 服务。
+
+方式二：启动时覆盖环境变量：
+
+```bash
+export LOGSCOPE_AUTH_TOKEN='change-me-to-a-long-random-string'
+export ES_HOSTS='http://your-es:9200'
+docker compose up -d --build
+```
+
 ## 使用流程（最短路径）
 
 1. 打开 `/admin`，输入 token 并保存
