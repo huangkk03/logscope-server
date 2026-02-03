@@ -93,6 +93,13 @@ export LOGSCOPE_AUTH_TOKEN='change-me-to-a-long-random-string'
 docker compose up -d --build
 ```
 
+如果你机器上是老的 `docker-compose` 命令，也可以用：
+
+```bash
+export LOGSCOPE_AUTH_TOKEN='change-me-to-a-long-random-string'
+docker-compose up -d --build
+```
+
 默认端口：
 
 - LogScope：`http://localhost:8000`

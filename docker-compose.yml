@@ -1,3 +1,5 @@
+version: "3.8"
+
 services:
   logscope:
     build: .
@@ -13,23 +15,4 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-    depends_on:
-      - elasticsearch
-
-  # 可选：本地自带一个 ES（单节点、关闭安全认证，方便开发/测试）
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.2
-    container_name: logscope-es
-    restart: unless-stopped
-    environment:
-      discovery.type: single-node
-      xpack.security.enabled: "false"
-      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
-    ports:
-      - "9200:9200"
-    volumes:
-      - esdata:/usr/share/elasticsearch/data
-
-volumes:
-  esdata:
 
